@@ -1,0 +1,1 @@
+# akbank_genai_bootcamp_law_chatbot
