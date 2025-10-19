@@ -1,0 +1,20 @@
+# Core LangChain ekosistemi
+langchain
+langchain-community
+langchain-openai
+langchain-google-genai
+google-generativeai
+
+# Yoğun/sözcüksel geri getirme + reranker
+sentence-transformers
+faiss-cpu
+rank-bm25
+
+# Yardımcılar ve arayüz
+PyPDF2
+networkx
+gradio
+
+# (Opsiyonel) Aşağıdakiler genelde sentence-transformers ile gelir, gerekirse aç
+# torch
+# torchvision
