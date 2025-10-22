@@ -1,6 +1,6 @@
 # Core LangChain ekosistemi
-langchain
-langchain-community
+langchain>=0.2.12
+langchain-community>=0.2.12
 langchain-openai
 langchain-google-genai
 google-generativeai
@@ -10,11 +10,11 @@ sentence-transformers
 faiss-cpu
 rank-bm25
 
-# Yardımcılar ve arayüz
+# Yardımcılar ve masaüstü arayüz
 PyPDF2
 networkx
-gradio
+PyQt5
 
-# (Opsiyonel) Aşağıdakiler genelde sentence-transformers ile gelir, gerekirse aç
+# (Opsiyonel) Bazı sistemlerde sentence-transformers için gerekli olabilir
 # torch
 # torchvision
