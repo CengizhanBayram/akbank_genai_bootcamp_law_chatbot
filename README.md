@@ -105,12 +105,12 @@ PyQt5
 ```powershell
 # (Windows / Anaconda örneği)
 "C:\Users\<USER>\anaconda3\python.exe" -m pip install --upgrade pip
-"C:\Users\<USER>\anaconda3\python.exe" -m pip install -r requirements-pyqt.txt
+"C:\Users\<USER>\anaconda3\python.exe" -m pip install -r requirements.txt
 # FAISS pip’te hata verirse
 a> conda install -c conda-forge faiss-cpu -y
 ```
 
-> `ModuleNotFoundError: langchain_community` görürsen: `-r requirements` yerine **`-r requirements-pyqt.txt`** kullandığından emin ol.
+> `ModuleNotFoundError: langchain_community` görürsen: `-r requirements` yerine **`-r requirements.txt`** kullandığından emin ol.
 
 ---
 
