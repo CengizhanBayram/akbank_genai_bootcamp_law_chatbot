@@ -24,7 +24,6 @@ Türk Anayasası (ve benzeri hukuk metinleri) üzerinde **GraphRAG** mimarisiyle
 * [Yapılandırma (CFG)](#yapılandırma-cfg)
 * [Dizin Yapısı](#dizin-yapısı)
 * [Güvenlik / Sınırlamalar](#güvenlik--sınırlamalar)
-* [Yol Haritası](#yol-haritası)
 
 ---
 
@@ -196,12 +195,6 @@ project/
 
 ---
 
-## Yol Haritası
 
-* UI: model seçimi (Gemini/OpenAI) ve RAG parametrelerini PyQt arayüzünden değiştirilebilir hale getirme (v2’de kısmen hazır)
-* İndeks durumu ve istatistik paneli (düğüm/kenar sayısı, parça adedi)
-* Sohbeti **Markdown/HTML** olarak dışa aktarma, **kopyala** düğmesi
-* Çoklu belge desteği ve **koleksiyon** yönetimi
-* Hızlı “Madde atıf grafı” görselleştirme
 
 
