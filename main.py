@@ -3,36 +3,38 @@
 """
 PyQt5 Arayüzlü GraphRAG Hukuk Chatbot (Anayasa)
 - FAISS (LangChain) vektör indeksi
-- Bilgi grafı (NetworkX): ardışık/section/xref (Madde→Madde)
+- Bilgi grafı (NetworkX): ardışık/sektion/xref (Madde→Madde)
 - Hibrit geri getirme: FAISS + BM25 + HyDE + Graph genişletme
 - Reranking: Sentence-Transformers CrossEncoder (opsiyonel)
-- LLM: Gemini (varsayılan) / OpenAI
+- LLM: Gemini (varsayılan) / OpenAI / Ollama
 
 KULLANIM
 --------
-1) Kurulum:
+1) Kurulum (önerilen paketler):
    pip install -U pip
-   pip install PyQt5 PyPDF2 networkx faiss-cpu \
-               langchain langchain-community langchain-openai langchain-google-genai google-generativeai \
+   pip install PyQt5 PyPDF2 networkx gradio faiss-cpu langchain langchain-community \
+               langchain-openai langchain-google-genai google-generativeai \
                sentence-transformers rank-bm25
-   # Windows'ta faiss pip sorun çıkarırsa: conda install -c conda-forge faiss-cpu -y
+   # Windows'ta faiss sorun çıkarırsa: conda install -c conda-forge faiss-cpu -y
 
 2) Gemini anahtarı (sohbet için):
    macOS/Linux: export GOOGLE_API_KEY=...
    Windows PS:  $env:GOOGLE_API_KEY="..."
 
 3) Uygulama:
-   python main_pyqt_v2.py
+   python main_pyqt.py
+
+Not: İndeksleme sırasında LLM gerekmez; yalnızca sohbet aşamasında kullanılır.
 """
 
 import os
 import re
 import json
-import pickle
 import pathlib
+import pickle
 import traceback
 from dataclasses import dataclass
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 # --------- NLP / RAG bağımlılıkları ---------
 import networkx as nx
@@ -58,12 +60,12 @@ except Exception:
 
 # --------- PyQt5 ---------
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFileDialog, QMessageBox,
     QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit, QTextEdit,
-    QTabWidget, QGroupBox, QFormLayout, QCheckBox, QSpinBox, QProgressBar,
-    QSplitter, QSizePolicy, QComboBox
+    QTabWidget, QGroupBox, QFormLayout, QProgressBar,
+    QComboBox, QSpinBox, QCheckBox, QSplitter, QSizePolicy,
+    QToolButton, QScrollArea
 )
 
 # ---------------- CONFIG ----------------
@@ -93,7 +95,7 @@ class Config:
     initial_topn: int = 24
 
     # LLM
-    llm_backend: str = "gemini"  # "gemini" | "openai"
+    llm_backend: str = "gemini"  # "gemini" | "openai" | "ollama"
     gemini_model: str = "gemini-1.5-pro"
     openai_model: str = "gpt-4o-mini"
     temperature: float = 0.0
@@ -129,6 +131,7 @@ def read_txt(path: str) -> str:
         return f.read()
 
 # --------------- MODEL YAPILARI ---------------
+from dataclasses import dataclass
 @dataclass
 class Article:
     id: str
@@ -142,9 +145,12 @@ def extract_sections_and_articles(raw: str) -> List[Article]:
     text = re.sub(r"\r", "\n", text)
     lines = text.splitlines()
 
+    # Madde başlangıçlarını tespit
     madde_indices: List[Tuple[int, str]] = []
     for i, ln in enumerate(lines):
         ln_stripped = ln.strip()
+        if SECTION_PAT.match(ln_stripped):
+            pass
         m = re.search(r"(?i)^(madde\s+\d+)\s*[:\-.]?\s*(.*)$", ln_stripped)
         if m:
             madde_indices.append((i, m.group(1).title()))
@@ -166,6 +172,7 @@ def extract_sections_and_articles(raw: str) -> List[Article]:
 
     if not articles:
         articles = [Article(id="Metin", section="", title="Genel", text=text)]
+
     return articles
 
 
@@ -225,11 +232,9 @@ class GraphBuilder:
         G = nx.Graph()
         for a in articles:
             G.add_node(a.id, section=a.section, title=a.title, text=a.text)
-        # ardışık
         for i in range(len(articles) - 1):
             id1, id2 = articles[i].id, articles[i + 1].id
             G.add_edge(id1, id2, type="sequence", weight=0.5)
-        # aynı bölüm
         section_groups: Dict[str, List[str]] = {}
         for a in articles:
             key = a.section or ""
@@ -237,7 +242,6 @@ class GraphBuilder:
         for _, ids in section_groups.items():
             for i in range(len(ids) - 1):
                 G.add_edge(ids[i], ids[i + 1], type="section", weight=0.7)
-        # xref
         id_by_num: Dict[str, str] = {}
         for a in articles:
             m = re.search(r"(?i)madde\s+(\d+)", a.id)
@@ -248,7 +252,6 @@ class GraphBuilder:
                 target = id_by_num.get(hit)
                 if target and target != a.id:
                     G.add_edge(a.id, target, type="xref", weight=1.0)
-
         os.makedirs(os.path.dirname(self.cfg.graph_path), exist_ok=True)
         with open(self.cfg.graph_path, "wb") as f:
             pickle.dump(G, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -264,7 +267,6 @@ class Retriever:
             encode_kwargs={"normalize_embeddings": cfg.normalize_embeddings},
         )
         self.vectordb = FAISS.load_local(cfg.index_dir, self.emb, allow_dangerous_deserialization=True)
-
         with open(cfg.graph_path, "rb") as f:
             self.G = pickle.load(f)
 
@@ -272,7 +274,7 @@ class Retriever:
         self.bm25 = None
         if cfg.use_bm25:
             all_docs = []
-            for d in self.vectordb.docstore._dict.values():  # internal erişim
+            for d in self.vectordb.docstore._dict.values():  # erişim: internal
                 if isinstance(d, Document):
                     all_docs.append(d)
             if all_docs:
@@ -372,10 +374,10 @@ def load_llm(cfg: Config):
         return ChatGoogleGenerativeAI(model=cfg.gemini_model, temperature=cfg.temperature)
     if cfg.llm_backend == "openai":
         return ChatOpenAI(model=cfg.openai_model, temperature=cfg.temperature)
-    # default
+    # Ollama yolu eklemek isterseniz burada genişletilebilir
     return ChatGoogleGenerativeAI(model=cfg.gemini_model, temperature=cfg.temperature)
 
-# --------------- QA ENGINE ---------------
+
 class QAEngine:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -414,7 +416,6 @@ Soru:
         return "\n\n---\n\n".join(blocks)
 
     def answer(self, question: str) -> Tuple[str, List[Dict]]:
-        # A) adaylar: vektör + BM25 + HyDE
         lists: List[List[Document]] = []
         vec_docs = [d for (d, _s) in self.ret.vector_search(question, max(self.cfg.top_k_vector, self.cfg.initial_topn))]
         lists.append(vec_docs)
@@ -428,19 +429,13 @@ Soru:
                 hy_docs = [d for (d, _s) in self.ret.vector_search_by_vec(qv, max(6, self.cfg.top_k_vector//2))]
                 if hy_docs:
                     lists.append(hy_docs)
-
         fused = rrf_fuse(lists, k=self.cfg.rrf_k, topn=self.cfg.initial_topn)
-        # B) graf genişletme
         expanded = self.ret.expand_with_graph(fused, self.cfg.graph_neighbor_k)
-        # C) rerank
         reranked = self.ret.rerank(question, expanded, topk=self.cfg.max_context_docs)
-        # D) LLM cevabı
         ctx = self.make_context(reranked)
         prompt = LEGAL_SYSTEM_PROMPT + "\n\n" + ANSWER_PROMPT.format(question=question, contexts=ctx)
         resp = self.llm.invoke(prompt)
         text = getattr(resp, "content", str(resp))
-
-        # kaynaklar
         sources = []
         seen = set()
         for d in reranked:
@@ -479,7 +474,7 @@ QMainWindow { background-color: #0B1220; }
 QTabWidget::pane { border: 1px solid #1f2937; background: #0F172A; }
 QTabBar::tab { background: #0F172A; color: #E5E7EB; padding: 10px 16px; border: 1px solid #1f2937; border-bottom: none; }
 QTabBar::tab:selected { background: #111827; color: #FFFFFF; }
-QGroupBox { color: #E5E7EB; border: 1px solid #1f2937; border-radius: 12px; margin-top: 16px; padding: 12px; background: #0E1627; }
+QGroupBox { color: #E5E7EB; border: 1px solid #1f2937; border-radius: 12px; margin-top: 12px; padding: 12px; background: #0E1627; }
 QLabel { color: #CBD5E1; }
 QLineEdit, QTextEdit, QSpinBox, QComboBox { color: #E5E7EB; background: #111827; border: 1px solid #1f2937; border-radius: 10px; padding: 6px 8px; }
 QPushButton { background: #10B981; color: #0B1220; border: none; border-radius: 12px; padding: 10px 14px; font-weight: 600; }
@@ -488,6 +483,34 @@ QPushButton:disabled { background: #1f2937; color: #94a3b8; }
 QTextEdit#log, QTextEdit#chat { background: #0B1220; border: 1px solid #1f2937; color: #E5E7EB; border-radius: 12px; }
 """
 
+class CollapsibleBox(QWidget):
+    def __init__(self, title="Detaylar", parent=None, checked=True):
+        super().__init__(parent)
+        self.toggle = QToolButton(text=title, checkable=True, checked=checked)
+        self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        self.toggle.toggled.connect(self._on_toggled)
+
+        self.content = QScrollArea(maximumHeight=0, minimumHeight=0)
+        self.content.setWidgetResizable(True)
+        self.content.setFrameShape(self.content.NoFrame)
+        self.content.setVisible(checked)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0,0,0,0)
+        lay.addWidget(self.toggle)
+        lay.addWidget(self.content)
+
+    def setContentLayout(self, layout):
+        w = QWidget(); w.setLayout(layout)
+        self.content.setWidget(w)
+        self.content.setMaximumHeight(w.sizeHint().height()+12)
+
+    def _on_toggled(self, checked):
+        self.toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        self.content.setVisible(checked)
+
+# --------------- UI: PyQt5 ---------------
 class IngestWorker(QThread):
     progress = pyqtSignal(str)
     done = pyqtSignal(int)
@@ -501,14 +524,7 @@ class IngestWorker(QThread):
         try:
             if not os.path.exists(self.path):
                 raise FileNotFoundError(self.path)
-            # Ön kontroller: FAISS var mı?
-            try:
-                import faiss  # noqa: F401
-            except Exception:
-                raise ImportError("FAISS eksik: 'faiss-cpu' yüklü değil. Windows için: conda install -c conda-forge faiss-cpu -y")
             raw = read_pdf(self.path) if self.path.lower().endswith('.pdf') else read_txt(self.path)
-            if len((raw or '').strip()) < 100:
-                raise ValueError("Belgeden metin çıkarılamadı. PDF taranmış olabilir; önce OCR uygulayın veya TXT yükleyin.")
             self.progress.emit("Metin okundu, maddeler çıkarılıyor…")
             articles = extract_sections_and_articles(raw)
             self.progress.emit(f"Madde sayısı: {len(articles)} — Grafik oluşturuluyor…")
@@ -520,8 +536,7 @@ class IngestWorker(QThread):
             self.progress.emit("Tamamlandı.")
             self.done.emit(n)
         except Exception as e:
-            tb = traceback.format_exc()
-            self.error.emit(f"{e.__class__.__name__}: {e}\n{tb}")
+            self.error.emit(str(e))
 
 
 class AskWorker(QThread):
@@ -547,33 +562,16 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("GraphRAG • Hukuk Asistanı (PyQt)")
-        self.resize(1280, 860)
-        self.setMinimumSize(1100, 740)
-
-        # Header
-        header = QWidget()
-        header.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0EA5E9, stop:1 #10B981);")
-        hv = QHBoxLayout(header)
-        title = QLabel("  ⚖️  GraphRAG • Türkiye Anayasası Asistanı")
-        tfont = QFont()
-        tfont.setPointSize(16); tfont.setBold(True)
-        title.setFont(tfont); title.setStyleSheet("color: #0B1220;")
-        hv.addWidget(title)
-        hv.addStretch(1)
+        self.resize(980, 720)
 
         tabs = QTabWidget()
-        central = QWidget()
-        root = QVBoxLayout(central)
-        root.addWidget(header)
-        root.addWidget(tabs)
-        self.setCentralWidget(central)
+        self.setCentralWidget(tabs)
 
         # --- Tab 1: İndeks ---
         tab_idx = QWidget(); tabs.addTab(tab_idx, "İndeks")
         v = QVBoxLayout(tab_idx)
 
-        g_source = QGroupBox("Kaynak ve Çıktı")
-        form = QFormLayout(g_source)
+        form = QFormLayout()
         self.le_path = QLineEdit(); self.le_path.setPlaceholderText("Anayasa PDF/TXT yolu…")
         btn_browse = QPushButton("Dosya Seç")
         h = QHBoxLayout(); h.addWidget(self.le_path); h.addWidget(btn_browse)
@@ -586,14 +584,11 @@ class MainWindow(QMainWindow):
         form.addRow("FAISS index:", self.le_index)
         form.addRow("Graph:", self.le_graph)
 
-        v.addWidget(g_source)
-
+        v.addLayout(form)
         self.btn_ingest = QPushButton("İndeksle")
         v.addWidget(self.btn_ingest)
 
-        self.te_log = QTextEdit(); self.te_log.setObjectName("log"); self.te_log.setReadOnly(True)
-        self.te_log.setPlaceholderText("İndeksleme günlükleri burada görünecek…")
-        self.te_log.setMinimumHeight(220)
+        self.te_log = QTextEdit(); self.te_log.setReadOnly(True)
         v.addWidget(self.te_log)
 
         btn_browse.clicked.connect(self.on_browse)
@@ -603,11 +598,13 @@ class MainWindow(QMainWindow):
         tab_chat = QWidget(); tabs.addTab(tab_chat, "Sohbet")
         vc = QVBoxLayout(tab_chat)
 
+        # LLM & API anahtarı
         g_api = QGroupBox("LLM ve Anahtar")
         fa = QFormLayout(g_api)
         self.cb_backend = QComboBox(); self.cb_backend.addItems(["gemini", "openai"])
         self.cb_backend.setCurrentText(CFG.llm_backend)
-        self.le_api = QLineEdit(os.getenv("GOOGLE_API_KEY", "" if CFG.llm_backend=="gemini" else os.getenv("OPENAI_API_KEY","")))
+        default_key = os.getenv("GOOGLE_API_KEY", "") if CFG.llm_backend=="gemini" else os.getenv("OPENAI_API_KEY", "")
+        self.le_api = QLineEdit(default_key)
         fa.addRow("LLM:", self.cb_backend)
         fa.addRow("API KEY:", self.le_api)
         btn_set = QPushButton("Anahtarı (Geçici) Ayarla")
@@ -615,13 +612,12 @@ class MainWindow(QMainWindow):
         vc.addWidget(g_api)
         btn_set.clicked.connect(self.on_set_api)
 
-        g_params = QGroupBox("RAG Ayarları")
-        fp = QFormLayout(g_params)
-
+        # RAG ayarları (açılır/kapanır)
+        rag_box = CollapsibleBox("RAG Ayarları", checked=False)
+        rag_widget = QWidget(); fp = QFormLayout(rag_widget)
         self.cb_bm25 = QCheckBox("BM25 kullan"); self.cb_bm25.setChecked(CFG.use_bm25)
         self.cb_hyde = QCheckBox("HyDE kullan"); self.cb_hyde.setChecked(CFG.use_hyde)
         fp.addRow(self.cb_bm25, self.cb_hyde)
-
         def spin(val, lo, hi):
             s=QSpinBox(); s.setRange(lo,hi); s.setValue(val); return s
         self.sp_topk_vec = spin(CFG.top_k_vector, 1, 64)
@@ -631,7 +627,6 @@ class MainWindow(QMainWindow):
         self.sp_graph_k = spin(CFG.graph_neighbor_k, 0, 16)
         self.sp_ctx = spin(CFG.max_context_docs, 1, 24)
         self.sp_hyde_n = spin(CFG.hyde_num, 1, 8)
-
         fp.addRow("Top-K (vektör):", self.sp_topk_vec)
         fp.addRow("Top-K (BM25):", self.sp_topk_bm25)
         fp.addRow("Initial Top-N (fusion):", self.sp_init_topn)
@@ -639,41 +634,36 @@ class MainWindow(QMainWindow):
         fp.addRow("Graph neighbor k:", self.sp_graph_k)
         fp.addRow("Max context docs:", self.sp_ctx)
         fp.addRow("HyDE sayısı:", self.sp_hyde_n)
-
         btn_apply = QPushButton("Ayarları Uygula")
         fp.addRow("", btn_apply)
         btn_apply.clicked.connect(self.on_apply_params)
+        rag_box.setContentLayout(fp)
+        vc.addWidget(rag_box)
 
-        vc.addWidget(g_params)
-
-        # Konuşma: splitter ile geniş alan
+        # Sohbet alanı (büyük) + altta yazma bölümü
         splitter = QSplitter(Qt.Vertical)
         self.te_chat = QTextEdit(); self.te_chat.setObjectName("chat"); self.te_chat.setReadOnly(True)
         self.te_chat.setPlaceholderText("Sohbet burada görünecek…")
-        self.te_chat.setMinimumHeight(560)
+        self.te_chat.setMinimumHeight(520)
         self.te_chat.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
         composer = QWidget(); ch = QHBoxLayout(composer); ch.setContentsMargins(0,0,0,0)
-        self.le_q = QLineEdit(); self.le_q.setPlaceholderText("Sorunuzu yazın…")
-        self.btn_ask = QPushButton("Sor")
-        ch.addWidget(self.le_q); ch.addWidget(self.btn_ask)
-
+        self.tx_compose = QTextEdit(); self.tx_compose.setPlaceholderText("Sorunuzu yazın… Shift+Enter: yeni satır")
+        self.tx_compose.setFixedHeight(110)
+        self.btn_ask = QPushButton("Gönder"); self.btn_ask.clicked.connect(self.on_ask)
+        ch.addWidget(self.tx_compose); ch.addWidget(self.btn_ask)
         splitter.addWidget(self.te_chat)
         splitter.addWidget(composer)
         splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([700, 140])
         vc.addWidget(splitter)
-        self.btn_ask.clicked.connect(self.on_ask)
 
-        # global stil
+        # tema
         self.setStyleSheet(APP_STYLE)
 
     # --------- UI Slots ---------
     def on_browse(self):
-        start_dir = os.path.abspath(CFG.data_dir)
-        os.makedirs(start_dir, exist_ok=True)
-        pth, _ = QFileDialog.getOpenFileName(self, "PDF/TXT seç", start_dir, "PDF/TXT (*.pdf *.txt)")
+        pth, _ = QFileDialog.getOpenFileName(self, "PDF/TXT seç", "", "PDF/TXT (*.pdf *.txt)")
         if pth:
             self.le_path.setText(pth)
 
@@ -699,45 +689,51 @@ class MainWindow(QMainWindow):
     def on_ingest_error(self, msg: str):
         self.btn_ingest.setEnabled(True)
         QMessageBox.critical(self, "Hata", msg)
-        self.te_log.append(f"❌ Hata:\n{msg}")
+        self.te_log.append(f"❌ Hata: {msg}")
 
     def on_ingest_done(self, n_parts: int):
         self.btn_ingest.setEnabled(True)
-        self.te_log.append(f"✅ Tamam: {n_parts} parça indekslendi.\nIndex: {CFG.index_dir}\nGraph: {CFG.graph_path}")
+        self.te_log.append(f"✅ Tamam: {n_parts} parça indekslendi. Index: {CFG.index_dir}\nGraph: {CFG.graph_path}")
 
     def on_set_api(self):
         key = self.le_api.text().strip()
-        backend = self.cb_backend.currentText().strip()
+        backend = self.cb_backend.currentText().strip() if hasattr(self, 'cb_backend') else 'gemini'
         if not key:
             QMessageBox.warning(self, "Uyarı", "Geçerli bir API KEY girin.")
             return
-        if backend == "gemini":
-            os.environ["GOOGLE_API_KEY"] = key
-        elif backend == "openai":
-            os.environ["OPENAI_API_KEY"] = key
+        if backend == 'gemini':
+            os.environ['GOOGLE_API_KEY'] = key
+        else:
+            os.environ['OPENAI_API_KEY'] = key
         CFG.llm_backend = backend
         QMessageBox.information(self, "Bilgi", f"{backend.upper()} anahtarı bu oturum için ayarlandı.")
 
     def on_apply_params(self):
-        CFG.use_bm25 = self.cb_bm25.isChecked()
-        CFG.use_hyde = self.cb_hyde.isChecked()
-        CFG.top_k_vector = self.sp_topk_vec.value()
-        CFG.top_k_bm25 = self.sp_topk_bm25.value()
-        CFG.initial_topn = self.sp_init_topn.value()
-        CFG.rrf_k = self.sp_rrf.value()
-        CFG.graph_neighbor_k = self.sp_graph_k.value()
-        CFG.max_context_docs = self.sp_ctx.value()
-        CFG.hyde_num = self.sp_hyde_n.value()
+        if hasattr(self, 'cb_bm25'):
+            CFG.use_bm25 = self.cb_bm25.isChecked()
+            CFG.use_hyde = self.cb_hyde.isChecked()
+            CFG.top_k_vector = self.sp_topk_vec.value()
+            CFG.top_k_bm25 = self.sp_topk_bm25.value()
+            CFG.initial_topn = self.sp_init_topn.value()
+            CFG.rrf_k = self.sp_rrf.value()
+            CFG.graph_neighbor_k = self.sp_graph_k.value()
+            CFG.max_context_docs = self.sp_ctx.value()
+            CFG.hyde_num = self.sp_hyde_n.value()
         QMessageBox.information(self, "Ayarlar", "RAG ayarları güncellendi.")
 
     def on_ask(self):
-        q = self.le_q.text().strip()
+        q = None
+        if hasattr(self, 'tx_compose'):
+            q = self.tx_compose.toPlainText().strip()
+        else:
+            q = getattr(self, 'le_q', QLineEdit()).text().strip()
         if not q:
             return
         if not (os.path.exists(CFG.index_dir) and os.path.exists(CFG.graph_path)):
             QMessageBox.warning(self, "Uyarı", "Önce indeks oluşturun (İndeks sekmesi).")
             return
-        self.btn_ask.setEnabled(False)
+        if hasattr(self, 'btn_ask'):
+            self.btn_ask.setEnabled(False)
         self.te_chat.append(f"<b>Siz:</b> {q}")
         self.askw = AskWorker(q)
         self.askw.progress.connect(lambda s: self.te_chat.append(f"<i>{s}</i>"))
@@ -747,18 +743,22 @@ class MainWindow(QMainWindow):
 
     def on_ask_error(self, msg: str):
         self.btn_ask.setEnabled(True)
-        self.te_chat.append(f"<span style='color:#ef4444'>Hata: {msg}</span>")
+        self.te_chat.append(f"<span style='color:#c00'>Hata: {msg}</span>")
 
     def on_ask_done(self, text: str, sources: list):
-        self.btn_ask.setEnabled(True)
+        if hasattr(self, 'btn_ask'):
+            self.btn_ask.setEnabled(True)
         src_html = "<br>".join([f"- <b>{s['article_id']}</b> — {s['title']} ({s['section']})" for s in sources])
         self.te_chat.append(f"<b>Asistan:</b> {text}<br><br><b>Kaynaklar:</b><br>{src_html}<hr>")
-        self.le_q.clear()
+        if hasattr(self, 'tx_compose'):
+            self.tx_compose.clear()
+        elif hasattr(self, 'le_q'):
+            self.le_q.clear()
+
 
 # --------------- ENTRY ---------------
 if __name__ == "__main__":
     import sys
-    os.makedirs(CFG.data_dir, exist_ok=True)
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()
