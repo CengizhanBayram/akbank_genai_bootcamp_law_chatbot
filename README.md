@@ -35,6 +35,7 @@ PyQt arayüzü iki sekmeden oluşur:
 * **İndeks**: PDF/TXT seç, **İndeksle** ➜ FAISS + Graf oluşturulur.
 * **Sohbet**: API anahtarını gir, sorunu yaz ➜ yanıt + **Kaynaklar** (madde başlıkları) görünür.
 <img width="1239" height="824" alt="image" src="https://github.com/user-attachments/assets/6bdc7513-0d03-461f-9b6e-cafb1e89a846" />
+<img width="966" height="905" alt="image" src="https://github.com/user-attachments/assets/f7ebcda5-dddc-447e-84a9-81b07e3ef873" />
 
 ---
 
